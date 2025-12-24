@@ -1,0 +1,440 @@
+import React, { useState } from 'react';
+import { Grid, Plus, Trash2, Clipboard, Upload, Zap, X, AlertCircle, Sliders } from 'lucide-react';
+import * as XLSX from 'xlsx';
+import { WEEKDAYS } from '../constants';
+import { generateDefaultMatrix, DEFAULT_GA_CONFIG } from '../scheduling';
+import LoadingOverlay from './LoadingOverlay';
+
+/**
+ * Visual editor for the shift pattern matrix
+ *
+ * @param {Object} props
+ * @param {Array<Array<string>>} props.matrix - Current matrix
+ * @param {Function} props.setMatrix - Setter for matrix
+ * @param {Array<Object>} props.shiftTypes - Available shift types
+ * @param {Array<Object>} props.constraints - Application constraints
+ * @param {Array<Object>} props.coverageRules - Staffing requirements (Flexible rules)
+ */
+const MatrixEditor = ({
+  matrix,
+  setMatrix,
+  shiftTypes,
+  constraints,
+  coverageRules,
+  employees,
+  year,
+  month
+}) => {
+  const [showImport, setShowImport] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [importError, setImportError] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generationStats, setGenerationStats] = useState(null);
+
+  // GA Parameters
+  const [popSize, setPopSize] = useState(DEFAULT_GA_CONFIG.POPULATION_SIZE);
+  const [maxGen, setMaxGen] = useState(DEFAULT_GA_CONFIG.MAX_GENERATIONS);
+  const [timeoutSec, setTimeoutSec] = useState(DEFAULT_GA_CONFIG.TIMEOUT_MS / 1000);
+  const [stagnationLimit, setStagnationLimit] = useState(DEFAULT_GA_CONFIG.STAGNATION_LIMIT);
+  const [eliteCount, setEliteCount] = useState(DEFAULT_GA_CONFIG.ELITE_COUNT);
+  const [mutationRate, setMutationRate] = useState(DEFAULT_GA_CONFIG.MUTATION_RATE);
+
+  // Worker ref for cancellation
+  const workerRef = React.useRef(null);
+
+  // Derive column count from matrix dimensions
+  const columnCount = matrix[0]?.length || 7;
+
+  const handleGenerate = () => {
+    setIsGenerating(true);
+    setGenerationStats(null);
+    
+    // Terminate existing worker if any
+    if (workerRef.current) {
+      workerRef.current.terminate();
+    }
+
+    const worker = new Worker(new URL('../scheduling/worker.js', import.meta.url), { type: 'module' });
+    workerRef.current = worker;
+
+    worker.onmessage = (e) => {
+      const { type, payload } = e.data;
+
+      if (type === 'PROGRESS') {
+        setGenerationStats(payload);
+      } else if (type === 'SUCCESS') {
+        if (payload) {
+          setMatrix(payload);
+        } else {
+          alert('Impossibile generare una matrice valida con i vincoli attuali.\nProva a rilassare i vincoli o cambiare i requisiti.');
+        }
+        setIsGenerating(false);
+        worker.terminate();
+        workerRef.current = null;
+      } else if (type === 'ERROR') {
+        console.error(payload);
+        alert('Errore durante la generazione: ' + payload);
+        setIsGenerating(false);
+        worker.terminate();
+        workerRef.current = null;
+      }
+    };
+
+    worker.postMessage({
+      type: 'GENERATE_MATRIX',
+      payload: {
+        shiftTypes,
+        constraints,
+        coverageRules,
+        columnCount,
+        employees,
+        year,
+        month,
+        rowCount: matrix.length > 0 ? matrix.length : null,
+        options: {
+          POPULATION_SIZE: parseInt(popSize),
+          MAX_GENERATIONS: parseInt(maxGen),
+          TIMEOUT_MS: parseInt(timeoutSec) * 1000,
+          STAGNATION_LIMIT: parseInt(stagnationLimit),
+          ELITE_COUNT: parseInt(eliteCount),
+          MUTATION_RATE: parseFloat(mutationRate)
+        }
+      }
+    });
+  };
+  
+  const handleCancel = () => {
+    if (workerRef.current) {
+      workerRef.current.terminate();
+      workerRef.current = null;
+    }
+    setIsGenerating(false);
+    setGenerationStats(null);
+  };
+
+  const parseImportText = (text) => {
+    setImportError('');
+    const lines = text.trim().split('\n').filter(l => l.trim());
+
+    if (lines.length === 0) {
+      setImportError('Nessun dato trovato');
+      return;
+    }
+
+    const newMatrix = [];
+    const validShiftIds = shiftTypes.map(s => s.id);
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      const cells = line.split(/[\t,;]+|\s{2,}/).map(c => c.trim().toUpperCase()).filter(c => c);
+
+      if (cells.length === 0) continue;
+
+      const validatedRow = cells.map(cell => {
+        if (validShiftIds.includes(cell)) return cell;
+        const match = validShiftIds.find(id => cell.startsWith(id));
+        return match || 'RP';
+      });
+
+      while (validatedRow.length < columnCount) validatedRow.push('RP');
+      if (validatedRow.length > columnCount) validatedRow.length = columnCount;
+
+      newMatrix.push(validatedRow);
+    }
+
+    if (newMatrix.length === 0) {
+      setImportError('Impossibile analizzare i dati. Usa tab o virgola come separatore.');
+      return;
+    }
+
+    setMatrix(newMatrix);
+    setShowImport(false);
+    setImportText('');
+  };
+
+  const handleFileImport = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const data = new Uint8Array(event.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+        const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
+
+        const text = jsonData.map(row => row.join('\t')).join('\n');
+        setImportText(text);
+        parseImportText(text);
+      } catch (err) {
+        setImportError('Errore nella lettura del file: ' + err.message);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const updateCell = (rowIndex, colIndex, value) => {
+    setMatrix(matrix.map((row, ri) =>
+      ri === rowIndex
+        ? row.map((cell, ci) => ci === colIndex ? value : cell)
+        : row
+    ));
+  };
+
+  const addRow = () => {
+    setMatrix([...matrix, Array(columnCount).fill('RP')]);
+  };
+
+  const removeRow = (rowIndex) => {
+    setMatrix(matrix.filter((_, i) => i !== rowIndex));
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Editor Card */}
+      <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+        <LoadingOverlay 
+          visible={isGenerating} 
+          stats={generationStats} 
+          onCancel={handleCancel}
+          allowGreedyFallback={false}
+        />
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-base font-semibold text-slate-800 flex items-center gap-2">
+            <Grid size={18} />
+            Matrice ({matrix.length}×{columnCount})
+          </h3>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowImport(!showImport)}
+              className="flex items-center gap-1 px-3 py-1.5 bg-slate-600 text-white rounded text-xs hover:bg-slate-700"
+            >
+              <Clipboard size={14} />
+              Importa
+            </button>
+            <button
+              onClick={handleGenerate}
+              disabled={isGenerating}
+              className="flex items-center gap-1 px-3 py-1.5 bg-amber-500 text-white rounded text-xs hover:bg-amber-600 disabled:opacity-50"
+            >
+              <Zap size={14} className={isGenerating ? "animate-spin" : ""} />
+              {isGenerating ? "Gen..." : "Genera"}
+            </button>
+            <button
+              onClick={addRow}
+              className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-700"
+            >
+              <Plus size={14} />
+              Riga
+            </button>
+          </div>
+        </div>
+
+        {/* Import Panel */}
+        {showImport && (
+          <div className="mb-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-sm font-medium text-slate-700">Importa Matrice</h4>
+              <button
+                onClick={() => setShowImport(false)}
+                className="p-1 text-slate-400 hover:text-slate-600"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-300 rounded-lg cursor-pointer hover:bg-slate-50 text-sm">
+                  <Upload size={16} className="text-slate-500" />
+                  <span>Carica file Excel/CSV</span>
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    onChange={handleFileImport}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">
+                  Oppure incolla qui (tab/virgola/punto e virgola come separatore):
+                </label>
+                <textarea
+                  value={importText}
+                  onChange={(e) => setImportText(e.target.value)}
+                  placeholder={"M\tP\tN\tSN\tRP\tM\tP\nP\tN\tSN\tRP\tM\tP\tP\n..."}
+                  className="w-full h-32 px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
+                />
+              </div>
+
+              {importError && (
+                <div className="text-red-600 text-xs flex items-center gap-1">
+                  <AlertCircle size={14} />
+                  {importError}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => parseImportText(importText)}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+                >
+                  Applica
+                </button>
+                <button
+                  onClick={() => { setShowImport(false); setImportText(''); setImportError(''); }}
+                  className="px-4 py-2 bg-slate-200 text-slate-700 rounded-lg text-sm hover:bg-slate-300"
+                >
+                  Annulla
+                </button>
+              </div>
+
+              <div className="text-xs text-slate-500">
+                <strong>Formato:</strong> Una riga per pattern. Codici: {shiftTypes.map(s => s.id).join(', ')}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Matrix Display */}
+        {matrix.length === 0 ? (
+          <div className="text-center py-8 text-slate-500">
+            <Grid size={40} className="mx-auto mb-2 opacity-30" />
+            <p className="text-sm">Clicca "Genera" o "Importa" per creare la matrice</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-slate-200">
+                  <th className="py-2 px-1 text-slate-600 w-10">#</th>
+                  {Array.from({ length: columnCount }, (_, i) => (
+                    <th key={i} className="py-2 px-1 text-slate-600">
+                      {WEEKDAYS[i % 7]}
+                    </th>
+                  ))}
+                  <th className="py-2 px-1 w-8"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {matrix.map((row, ri) => (
+                  <tr key={ri} className="border-b border-slate-100">
+                    <td className="py-1 px-1 text-slate-500 font-medium">R{ri + 1}</td>
+                    {row.map((cell, ci) => {
+                      const shiftType = shiftTypes.find(s => s.id === cell);
+                      return (
+                        <td key={ci} className="py-1 px-0.5">
+                          <select
+                            value={cell}
+                            onChange={(e) => updateCell(ri, ci, e.target.value)}
+                            className="w-11 h-6 text-xs border border-slate-200 rounded font-medium"
+                            style={{
+                              backgroundColor: shiftType?.color || '#fff',
+                              color: shiftType?.textColor || '#000'
+                            }}
+                          >
+                            {shiftTypes.map(st => (
+                              <option key={st.id} value={st.id}>{st.id}</option>
+                            ))}
+                          </select>
+                        </td>
+                      );
+                    })}
+                    <td className="py-1 px-1">
+                      <button
+                        onClick={() => removeRow(ri)}
+                        className="p-0.5 text-red-500"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* GA Parameters Card */}
+      <div className="bg-white rounded-xl p-4 shadow-sm border border-slate-200">
+        <h4 className="text-sm font-semibold text-slate-800 mb-3 flex items-center gap-2">
+          <Sliders size={16} />
+          Parametri Ottimizzazione (GA)
+        </h4>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+           <div>
+             <label className="block text-[10px] font-medium text-slate-500 mb-1">Popolazione</label>
+             <input
+               type="number"
+               value={popSize}
+               onChange={(e) => setPopSize(Math.max(100, parseInt(e.target.value) || 0))}
+               className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+               min="100"
+             />
+           </div>
+           <div>
+             <label className="block text-[10px] font-medium text-slate-500 mb-1">Max Generazioni</label>
+             <input
+               type="number"
+               value={maxGen}
+               onChange={(e) => setMaxGen(Math.max(1000, parseInt(e.target.value) || 0))}
+               className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+               min="1000"
+             />
+           </div>
+           <div>
+             <label className="block text-[10px] font-medium text-slate-500 mb-1">Timeout (sec)</label>
+             <input
+               type="number"
+               value={timeoutSec}
+               onChange={(e) => setTimeoutSec(Math.max(5, parseInt(e.target.value) || 0))}
+               className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+               min="5"
+             />
+           </div>
+           <div>
+             <label className="block text-[10px] font-medium text-slate-500 mb-1">Stagnazione (limit)</label>
+             <input
+               type="number"
+               value={stagnationLimit}
+               onChange={(e) => setStagnationLimit(Math.max(10, parseInt(e.target.value) || 0))}
+               className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+               min="10"
+             />
+           </div>
+           <div>
+             <label className="block text-[10px] font-medium text-slate-500 mb-1">Elite Count</label>
+             <input
+               type="number"
+               value={eliteCount}
+               onChange={(e) => setEliteCount(Math.max(0, parseInt(e.target.value) || 0))}
+               className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+               min="0"
+             />
+           </div>
+           <div>
+             <label className="block text-[10px] font-medium text-slate-500 mb-1">Mutation Rate (0-1)</label>
+             <input
+               type="number"
+               step="0.01"
+               value={mutationRate}
+               onChange={(e) => setMutationRate(Math.min(1, Math.max(0, parseFloat(e.target.value) || 0)))}
+               className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs"
+               min="0"
+               max="1"
+             />
+           </div>
+        </div>
+        <div className="mt-2 text-[10px] text-slate-400">
+          Valori più alti migliorano la qualità della matrice ma richiedono più tempo di calcolo.
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default MatrixEditor;

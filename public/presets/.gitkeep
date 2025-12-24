@@ -1,0 +1,11 @@
+# Questa cartella contiene i preset privati.
+# I file .json in questa cartella NON vengono pushati su GitHub.
+# 
+# Per aggiungere un preset:
+# 1. Esporta il preset dall'app (icona download nel menu preset)
+# 2. Salva il file .json in questa cartella
+# 3. Ricarica l'app - il preset apparirà automaticamente
+#
+# Per condividere preset con colleghi:
+# - Invia il file .json via email/USB
+# - Il collega lo salva nella propria cartella /public/presets/

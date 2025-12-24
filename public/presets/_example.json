@@ -1,0 +1,33 @@
+{
+  "version": "1.0",
+  "name": "Esempio Struttura",
+  "description": "Preset di esempio con dati fittizi. Usa questo come modello per creare i tuoi preset.",
+  "config": {
+    "facility": {
+      "name": "Struttura Esempio",
+      "cycleLength": 7,
+      "requirements": { "M": 2, "P": 2, "N": 1, "SN": 0, "RP": 0, "N11": 0 }
+    },
+    "shiftTypes": [
+      { "id": "M", "name": "Mattina", "hours": 6, "color": "#FCD34D", "textColor": "#1a1a1a" },
+      { "id": "P", "name": "Pomeriggio", "hours": 7, "color": "#60A5FA", "textColor": "#1a1a1a" },
+      { "id": "N", "name": "Notte", "hours": 4, "color": "#1E3A5F", "textColor": "#ffffff" },
+      { "id": "SN", "name": "Smonto Notte", "hours": 7, "color": "#6366F1", "textColor": "#ffffff" },
+      { "id": "RP", "name": "Riposo", "hours": 0, "color": "#E5E7EB", "textColor": "#666666" },
+      { "id": "N11", "name": "Notte Lunga", "hours": 11, "color": "#0F172A", "textColor": "#ffffff" }
+    ],
+    "constraints": [
+      { "id": "c1", "type": "must_follow", "shiftA": "SN", "shiftB": "RP", "enabled": true },
+      { "id": "c2", "type": "cannot_follow", "shiftA": "RP", "shiftB": "M", "enabled": true },
+      { "id": "c3", "type": "max_consecutive_without", "shift": "RP", "days": 6, "enabled": true }
+    ],
+    "employees": [
+      { "id": "emp-1", "surname": "ROSSI", "name": "MARIO", "contractHours": 38, "excludedShifts": [] },
+      { "id": "emp-2", "surname": "BIANCHI", "name": "GIULIA", "contractHours": 36, "excludedShifts": [] }
+    ],
+    "matrix": [
+      ["M", "P", "N", "SN", "RP", "M", "P"],
+      ["P", "N", "SN", "RP", "M", "P", "P"]
+    ]
+  }
+}
