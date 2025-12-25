@@ -262,6 +262,7 @@ export default function TurniOSSApp() {
         constraints,
         previousMonthSchedule,
         optimizerOptions: {
+          useCSP: !options.forceGreedy, // Disable CSP/GA if greedy is forced
           gaTimeoutMs: 1800000, // 30 minutes
           greedyFallback: !!options.forceGreedy, // Use greedy only if explicitly requested
           weights: options.weights,
