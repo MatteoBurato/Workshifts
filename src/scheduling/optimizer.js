@@ -29,7 +29,9 @@ import { getFirstDayOfMonth } from '../utils/dates.js';
  * @param {number} params.daysInMonth
  * @param {Array<Object>} params.employees
  * @param {Array<Object>} params.shiftTypes
- * @param {Array<Array<string>>} params.matrix
+ * @param {Array<Object>} params.matrices - Array of { id, name, rows } matrix objects
+ * @param {Object} params.matrixMap - Map from matrixId to matrix rows
+ * @param {Array<Array<string>>} params.defaultMatrix - Default matrix rows (first matrix)
  * @param {Array<Object>} params.constraints - Application constraints
  * @param {Object<string, number>} params.requirements - Coverage requirements
  * @param {Object} params.options - GA options
@@ -37,28 +39,30 @@ import { getFirstDayOfMonth } from '../utils/dates.js';
  */
 export const solveWithGA = (params) => {
   const {
-    year,
-    month,
     daysInMonth,
     employees,
     shiftTypes,
-    matrix,
     constraints,
     coverageRules,
     options = {}
   } = params;
 
   try {
-    // 1. Calculate optimal matrix assignments (handling continuity)
-    const cycleLen = params.cycleLength || matrix[0].length;
-    console.log('[Optimizer] Calculating assignments with cycleLength:', cycleLen);
-    const initialAssignments = findOptimalMatrixAssignment(
-      employees,
-      matrix,
-      params.previousMonthSchedule,
-      cycleLen
-    );
-    console.log('[Optimizer] Initial assignments sample:', initialAssignments.slice(0, 3));
+    // Use solveWithGreedy to generate the baseline schedule
+    // This handles global phase synchronization and matrix unraveling
+    const greedyResult = solveWithGreedy(params);
+
+    // Extract shifts from greedy result to use as baseline
+    const baselineShifts = {};
+    for (const emp of employees) {
+      if (greedyResult.schedule[emp.id]?.shifts) {
+        baselineShifts[emp.id] = greedyResult.schedule[emp.id].shifts;
+      }
+    }
+
+    // Get assignments from greedy result for metadata
+    const initialAssignments = greedyResult.assignments || [];
+    console.log('[Optimizer] Baseline from greedy, assignments sample:', initialAssignments.slice(0, 3));
 
     // Build GA options explicitly using single source of truth for defaults
     const gaOptions = {
@@ -74,16 +78,14 @@ export const solveWithGA = (params) => {
 
     console.log('[GA] Running with options:', gaOptions);
 
+    // Pass baselineShifts directly - GA evolves from greedy solution
     const result = runGeneticAlgorithm({
-      year,
-      month,
       daysInMonth,
       employees,
       shiftTypes,
-      matrix,
+      baselineShifts,
       constraints,
       coverageRules,
-      initialAssignments,
       options: gaOptions,
       onProgress: options.onProgress
     });
@@ -226,7 +228,7 @@ export const calculateContinuityScore = (lastShifts, matrix, matrixRow, startOff
  * @param {number} cycleLength
  * @returns {Array<Object>} Assignments
  */
-export const findOptimalMatrixAssignment = (employees, matrix, previousMonthSchedule, cycleLength) => {
+export const findOptimalMatrixAssignment = (employees, matrix, previousMonthSchedule, cycleLength, forcedPhase = null) => {
   const rowLength = matrix[0].length;
   const totalRows = matrix.length;
   
@@ -349,28 +351,37 @@ export const findOptimalMatrixAssignment = (employees, matrix, previousMonthSche
   // --- PHASE SYNCHRONIZATION ---
   // We need to ensure everyone starts the new month at the same "Matrix Column" (Phase)
   // to preserve vertical coverage.
-  // 1. Vote for the most common "Target Next Offset" among reliable matches
-  const phaseVotes = {};
-  assignments.forEach(a => {
-    if (a.rawScore >= 0.4 && a.historyLength > 0) {
-      phaseVotes[a.targetNextOffset] = (phaseVotes[a.targetNextOffset] || 0) + 1;
-    }
-  });
 
-  // Find dominant phase
-  let dominantPhase = -1;
-  let maxVotes = 0;
-  for (const [phase, count] of Object.entries(phaseVotes)) {
-    if (count > maxVotes) {
-      maxVotes = count;
-      dominantPhase = parseInt(phase);
+  let dominantPhase;
+  let useDominantPhase;
+
+  if (forcedPhase !== null) {
+    // Use externally provided phase (for global sync across matrices)
+    dominantPhase = forcedPhase;
+    useDominantPhase = true;
+  } else {
+    // Vote for the most common "Target Next Offset" among reliable matches
+    const phaseVotes = {};
+    assignments.forEach(a => {
+      if (a.rawScore >= 0.4 && a.historyLength > 0) {
+        phaseVotes[a.targetNextOffset] = (phaseVotes[a.targetNextOffset] || 0) + 1;
+      }
+    });
+
+    // Find dominant phase
+    dominantPhase = -1;
+    let maxVotes = 0;
+    for (const [phase, count] of Object.entries(phaseVotes)) {
+      if (count > maxVotes) {
+        maxVotes = count;
+        dominantPhase = parseInt(phase);
+      }
     }
+
+    // Align everyone to Dominant Phase (if widely supported)
+    // If dominant phase has little support (e.g. < 2 votes), we might just trust the calendar (hasHistory=false).
+    useDominantPhase = maxVotes >= 2;
   }
-
-  // 2. Align everyone to Dominant Phase (if widely supported)
-  // If dominant phase has little support (e.g. < 2 votes), we might just trust the calendar (hasHistory=false).
-  // But if we have a clear signal, we enforce it.
-  const useDominantPhase = maxVotes >= 2;
 
   if (useDominantPhase) {
     // We need to re-evaluate assignments for everyone to find the best ROW given the forced PHASE.
@@ -437,52 +448,125 @@ export const solveWithGreedy = (params) => {
     month,
     daysInMonth,
     employees,
-    matrix,
+    matrices,
+    matrixMap,
+    defaultMatrix,
     previousMonthSchedule,
     cycleLength
   } = params;
 
-  const assignments = findOptimalMatrixAssignment(
-    employees,
-    matrix,
-    previousMonthSchedule,
-    cycleLength
-  );
-
-  const schedule = {};
-  const fullPattern = matrix.flat();
-  const rowLength = matrix[0].length;
   const dayOfWeekOffset = getFirstDayOfMonth(year, month);
+  const defaultMatrixId = matrices?.[0]?.id;
 
+  // Group employees by their assigned matrix
+  const employeesByMatrix = {};
   for (const emp of employees) {
-    const assignment = assignments.find(a => a.employeeId === emp.id);
-    const matrixRow = assignment?.matrixRow || 0;
-    const dayOffset = assignment?.dayOffset || 0;
-    const effectiveDOW = assignment?.hasHistory ? 0 : dayOfWeekOffset;
+    const matrixId = emp.matrixId || defaultMatrixId;
+    if (!employeesByMatrix[matrixId]) {
+      employeesByMatrix[matrixId] = [];
+    }
+    employeesByMatrix[matrixId].push(emp);
+  }
 
-    // Calculate start index in the snake
-    const startIndex = matrixRow * rowLength + dayOffset;
+  // ========== GLOBAL PHASE SYNCHRONIZATION (Two-Pass Approach) ==========
+  // PASS 1: Get preliminary assignments WITHOUT phase enforcement
+  const preliminaryAssignments = [];
 
-    const shifts = [];
-    for (let day = 0; day < daysInMonth; day++) {
-      const patternIndex = (startIndex + day + effectiveDOW) % fullPattern.length;
-      shifts.push(fullPattern[patternIndex]);
+  for (const matrixId of Object.keys(employeesByMatrix)) {
+    const groupEmployees = employeesByMatrix[matrixId];
+    const matrix = (matrixMap && matrixMap[matrixId]) || defaultMatrix;
+    const rowLength = matrix[0]?.length || 7;
+
+    const groupAssignments = findOptimalMatrixAssignment(
+      groupEmployees,
+      matrix,
+      previousMonthSchedule,
+      cycleLength || rowLength,
+      null  // No forced phase - just get targetNextOffset
+    );
+
+    for (const assignment of groupAssignments) {
+      assignment.matrixId = matrixId;
+      preliminaryAssignments.push(assignment);
+    }
+  }
+
+  // GLOBAL PHASE VOTE across all matrices
+  const phaseVotes = {};
+  preliminaryAssignments.forEach(a => {
+    if (a.rawScore >= 0.4 && a.historyLength > 0) {
+      phaseVotes[a.targetNextOffset] = (phaseVotes[a.targetNextOffset] || 0) + 1;
+    }
+  });
+
+  // Find dominant phase
+  let globalDominantPhase = null;
+  let maxVotes = 0;
+  for (const [phase, count] of Object.entries(phaseVotes)) {
+    if (count > maxVotes) {
+      maxVotes = count;
+      globalDominantPhase = parseInt(phase);
+    }
+  }
+
+  // Only use global phase if we have meaningful consensus (>= 2 votes)
+  const useGlobalPhase = maxVotes >= 2;
+  // console.log('[Greedy] Global phase vote:', { phaseVotes, globalDominantPhase, useGlobalPhase });
+
+  // PASS 2: Re-assign with global dominant phase and generate schedule
+  const allAssignments = [];
+  const schedule = {};
+
+  for (const matrixId of Object.keys(employeesByMatrix)) {
+    const groupEmployees = employeesByMatrix[matrixId];
+    const matrix = (matrixMap && matrixMap[matrixId]) || defaultMatrix;
+    const rowLength = matrix[0]?.length || 7;
+    const fullPattern = matrix.flat();
+
+    const groupAssignments = findOptimalMatrixAssignment(
+      groupEmployees,
+      matrix,
+      previousMonthSchedule,
+      cycleLength || rowLength,
+      useGlobalPhase ? globalDominantPhase : null  // Force global phase if consensus
+    );
+
+    for (const assignment of groupAssignments) {
+      assignment.matrixId = matrixId;
+      allAssignments.push(assignment);
     }
 
-    schedule[emp.id] = {
-      shifts,
-      source: 'greedy',
-      matrixRow,
-      dayOffset,
-      continuityScore: assignment?.continuityScore
-    };
+    for (const emp of groupEmployees) {
+      const assignment = groupAssignments.find(a => a.employeeId === emp.id);
+      const matrixRow = assignment?.matrixRow || 0;
+      const dayOffset = assignment?.dayOffset || 0;
+      const effectiveDOW = assignment?.hasHistory ? 0 : dayOfWeekOffset;
+
+      // Calculate start index in the snake
+      const startIndex = matrixRow * rowLength + dayOffset;
+
+      const shifts = [];
+      for (let day = 0; day < daysInMonth; day++) {
+        const patternIndex = (startIndex + day + effectiveDOW) % fullPattern.length;
+        shifts.push(fullPattern[patternIndex]);
+      }
+
+      schedule[emp.id] = {
+        shifts,
+        source: 'greedy',
+        matrixRow,
+        dayOffset,
+        matrixId,
+        continuityScore: assignment?.continuityScore
+      };
+    }
   }
 
   return {
     success: true,
     schedule,
     method: 'greedy',
-    assignments
+    assignments: allAssignments
   };
 };
 

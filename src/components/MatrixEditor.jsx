@@ -1,23 +1,24 @@
 import React, { useState } from 'react';
-import { Grid, Plus, Trash2, Clipboard, Upload, Zap, X, AlertCircle, Sliders } from 'lucide-react';
+import { Grid, Plus, Trash2, Clipboard, Upload, Zap, X, AlertCircle, Sliders, Edit2, Check } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { WEEKDAYS } from '../constants';
 import { generateDefaultMatrix, DEFAULT_GA_CONFIG } from '../scheduling';
+import { generateId } from '../utils';
 import LoadingOverlay from './LoadingOverlay';
 
 /**
- * Visual editor for the shift pattern matrix
+ * Visual editor for multiple shift pattern matrices
  *
  * @param {Object} props
- * @param {Array<Array<string>>} props.matrix - Current matrix
- * @param {Function} props.setMatrix - Setter for matrix
+ * @param {Array<Object>} props.matrices - Array of { id, name, rows } objects
+ * @param {Function} props.setMatrices - Setter for matrices
  * @param {Array<Object>} props.shiftTypes - Available shift types
  * @param {Array<Object>} props.constraints - Application constraints
  * @param {Array<Object>} props.coverageRules - Staffing requirements (Flexible rules)
  */
 const MatrixEditor = ({
-  matrix,
-  setMatrix,
+  matrices,
+  setMatrices,
   shiftTypes,
   constraints,
   coverageRules,
@@ -25,10 +26,16 @@ const MatrixEditor = ({
   year,
   month
 }) => {
+  // Track which matrix is currently selected
+  const [selectedMatrixId, setSelectedMatrixId] = useState(matrices[0]?.id || null);
+  const [editingName, setEditingName] = useState(null);
+  const [editNameValue, setEditNameValue] = useState('');
+
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState('');
   const [importError, setImportError] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generatingAll, setGeneratingAll] = useState(false); // true when generating all matrices jointly
   const [generationStats, setGenerationStats] = useState(null);
 
   // GA Parameters
@@ -38,17 +45,69 @@ const MatrixEditor = ({
   const [stagnationLimit, setStagnationLimit] = useState(DEFAULT_GA_CONFIG.STAGNATION_LIMIT);
   const [eliteCount, setEliteCount] = useState(DEFAULT_GA_CONFIG.ELITE_COUNT);
   const [mutationRate, setMutationRate] = useState(DEFAULT_GA_CONFIG.MUTATION_RATE);
+  const [useCurrentAsSeed, setUseCurrentAsSeed] = useState(true);
 
   // Worker ref for cancellation
   const workerRef = React.useRef(null);
 
+  // Get the currently selected matrix
+  const selectedMatrix = matrices.find(m => m.id === selectedMatrixId);
+  const matrix = selectedMatrix?.rows || [];
+
   // Derive column count from matrix dimensions
   const columnCount = matrix[0]?.length || 7;
 
+  // Matrix CRUD operations
+  const addMatrix = () => {
+    const newMatrix = {
+      id: generateId(),
+      name: `Matrice ${matrices.length + 1}`,
+      rows: generateDefaultMatrix()
+    };
+    setMatrices([...matrices, newMatrix]);
+    setSelectedMatrixId(newMatrix.id);
+  };
+
+  const deleteMatrix = (matrixId) => {
+    if (matrices.length <= 1) {
+      alert('Deve esistere almeno una matrice');
+      return;
+    }
+    const newMatrices = matrices.filter(m => m.id !== matrixId);
+    setMatrices(newMatrices);
+    if (selectedMatrixId === matrixId) {
+      setSelectedMatrixId(newMatrices[0]?.id || null);
+    }
+  };
+
+  const startEditName = (matrixId, currentName) => {
+    setEditingName(matrixId);
+    setEditNameValue(currentName);
+  };
+
+  const saveEditName = () => {
+    if (editingName && editNameValue.trim()) {
+      setMatrices(matrices.map(m =>
+        m.id === editingName ? { ...m, name: editNameValue.trim() } : m
+      ));
+    }
+    setEditingName(null);
+    setEditNameValue('');
+  };
+
+  // Update the selected matrix's rows
+  const setMatrix = (newRows) => {
+    setMatrices(matrices.map(m =>
+      m.id === selectedMatrixId ? { ...m, rows: newRows } : m
+    ));
+  };
+
+  // Generate a single matrix (others held constant)
   const handleGenerate = () => {
     setIsGenerating(true);
+    setGeneratingAll(false);
     setGenerationStats(null);
-    
+
     // Terminate existing worker if any
     if (workerRef.current) {
       workerRef.current.terminate();
@@ -64,7 +123,10 @@ const MatrixEditor = ({
         setGenerationStats(payload);
       } else if (type === 'SUCCESS') {
         if (payload) {
-          setMatrix(payload);
+          // Update the selected matrix with the generated rows
+          setMatrices(matrices.map(m =>
+            m.id === selectedMatrixId ? { ...m, rows: payload } : m
+          ));
         } else {
           alert('Impossibile generare una matrice valida con i vincoli attuali.\nProva a rilassare i vincoli o cambiare i requisiti.');
         }
@@ -83,6 +145,8 @@ const MatrixEditor = ({
     worker.postMessage({
       type: 'GENERATE_MATRIX',
       payload: {
+        targetMatrixId: selectedMatrixId,
+        allMatrices: matrices,
         shiftTypes,
         constraints,
         coverageRules,
@@ -92,6 +156,71 @@ const MatrixEditor = ({
         month,
         rowCount: matrix.length > 0 ? matrix.length : null,
         options: {
+          useCurrentAsSeed,
+          POPULATION_SIZE: parseInt(popSize),
+          MAX_GENERATIONS: parseInt(maxGen),
+          TIMEOUT_MS: parseInt(timeoutSec) * 1000,
+          STAGNATION_LIMIT: parseInt(stagnationLimit),
+          ELITE_COUNT: parseInt(eliteCount),
+          MUTATION_RATE: parseFloat(mutationRate)
+        }
+      }
+    });
+  };
+
+  // Generate ALL matrices jointly
+  const handleGenerateAll = () => {
+    setIsGenerating(true);
+    setGeneratingAll(true);
+    setGenerationStats(null);
+
+    if (workerRef.current) {
+      workerRef.current.terminate();
+    }
+
+    const worker = new Worker(new URL('../scheduling/worker.js', import.meta.url), { type: 'module' });
+    workerRef.current = worker;
+
+    worker.onmessage = (e) => {
+      const { type, payload } = e.data;
+
+      if (type === 'PROGRESS') {
+        setGenerationStats(payload);
+      } else if (type === 'SUCCESS') {
+        if (payload && typeof payload === 'object') {
+          // payload is { matrixId: rows, ... }
+          setMatrices(matrices.map(m => ({
+            ...m,
+            rows: payload[m.id] || m.rows
+          })));
+        } else {
+          alert('Impossibile generare matrici valide con i vincoli attuali.\nProva a rilassare i vincoli o cambiare i requisiti.');
+        }
+        setIsGenerating(false);
+        worker.terminate();
+        workerRef.current = null;
+      } else if (type === 'ERROR') {
+        console.error(payload);
+        alert('Errore durante la generazione: ' + payload);
+        setIsGenerating(false);
+        worker.terminate();
+        workerRef.current = null;
+      }
+    };
+
+    worker.postMessage({
+      type: 'GENERATE_ALL_MATRICES',
+      payload: {
+        allMatrices: matrices,
+        shiftTypes,
+        constraints,
+        coverageRules,
+        columnCount,
+        employees,
+        year,
+        month,
+        options: {
+          useCurrentAsSeed,
           POPULATION_SIZE: parseInt(popSize),
           MAX_GENERATIONS: parseInt(maxGen),
           TIMEOUT_MS: parseInt(timeoutSec) * 1000,
@@ -192,18 +321,109 @@ const MatrixEditor = ({
 
   return (
     <div className="space-y-4">
-      {/* Editor Card */}
-      <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
-        <LoadingOverlay 
-          visible={isGenerating} 
-          stats={generationStats} 
+      {/* Matrix Tabs */}
+      <div className="bg-white rounded-xl p-4 shadow-sm border border-slate-200">
+        <LoadingOverlay
+          visible={isGenerating && generatingAll}
+          stats={generationStats}
           onCancel={handleCancel}
           allowGreedyFallback={false}
         />
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-base font-semibold text-slate-800 flex items-center gap-2">
             <Grid size={18} />
-            Matrice ({matrix.length}×{columnCount})
+            Matrici ({matrices.length})
+          </h3>
+          <div className="flex gap-2">
+            {matrices.length > 1 && (
+              <button
+                onClick={handleGenerateAll}
+                disabled={isGenerating}
+                className="flex items-center gap-1 px-3 py-1.5 bg-purple-600 text-white rounded text-xs hover:bg-purple-700 disabled:opacity-50"
+              >
+                <Zap size={14} className={isGenerating ? "animate-spin" : ""} />
+                {isGenerating ? "Gen..." : "Genera Tutte"}
+              </button>
+            )}
+            <button
+              onClick={addMatrix}
+              className="flex items-center gap-1 px-3 py-1.5 bg-green-600 text-white rounded text-xs hover:bg-green-700"
+            >
+              <Plus size={14} />
+              Nuova Matrice
+            </button>
+          </div>
+        </div>
+
+        {matrices.length === 0 ? (
+          <div className="text-center py-4 text-slate-500 text-sm">
+            Nessuna matrice. Clicca "Nuova Matrice" per crearne una.
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {matrices.map(m => (
+              <div
+                key={m.id}
+                className={`flex items-center gap-1 px-3 py-1.5 rounded-lg border cursor-pointer transition-colors ${
+                  selectedMatrixId === m.id
+                    ? 'bg-blue-50 border-blue-300 text-blue-700'
+                    : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                }`}
+                onClick={() => setSelectedMatrixId(m.id)}
+              >
+                {editingName === m.id ? (
+                  <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                    <input
+                      type="text"
+                      value={editNameValue}
+                      onChange={(e) => setEditNameValue(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && saveEditName()}
+                      className="w-24 px-1 py-0.5 text-xs border border-blue-300 rounded"
+                      autoFocus
+                    />
+                    <button onClick={saveEditName} className="p-0.5 text-green-600 hover:bg-green-50 rounded">
+                      <Check size={12} />
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <span className="text-xs font-medium">{m.name}</span>
+                    <span className="text-[10px] text-slate-400">({m.rows?.length || 0}×{m.rows?.[0]?.length || 7})</span>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); startEditName(m.id, m.name); }}
+                      className="p-0.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded"
+                    >
+                      <Edit2 size={10} />
+                    </button>
+                    {matrices.length > 1 && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deleteMatrix(m.id); }}
+                        className="p-0.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded"
+                      >
+                        <Trash2 size={10} />
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Editor Card - only show if a matrix is selected */}
+      {selectedMatrix && (
+      <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200">
+        <LoadingOverlay
+          visible={isGenerating && !generatingAll}
+          stats={generationStats}
+          onCancel={handleCancel}
+          allowGreedyFallback={false}
+        />
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-base font-semibold text-slate-800 flex items-center gap-2">
+            <Grid size={18} />
+            {selectedMatrix.name} ({matrix.length}×{columnCount})
           </h3>
           <div className="flex gap-2">
             <button
@@ -358,6 +578,7 @@ const MatrixEditor = ({
           </div>
         )}
       </div>
+      )}
 
       {/* GA Parameters Card */}
       <div className="bg-white rounded-xl p-4 shadow-sm border border-slate-200">
@@ -427,6 +648,18 @@ const MatrixEditor = ({
                min="0"
                max="1"
              />
+           </div>
+           <div className="md:col-span-3 flex items-center gap-2 pt-2 border-t border-slate-100">
+             <input
+               type="checkbox"
+               id="useCurrentAsSeed"
+               checked={useCurrentAsSeed}
+               onChange={(e) => setUseCurrentAsSeed(e.target.checked)}
+               className="h-3.5 w-3.5 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
+             />
+             <label htmlFor="useCurrentAsSeed" className="text-xs font-medium text-slate-700">
+               Usa matrici attuali come punto di partenza (seeding)
+             </label>
            </div>
         </div>
         <div className="mt-2 text-[10px] text-slate-400">

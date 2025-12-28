@@ -75,7 +75,7 @@ const applyExclusionConstraints = (shifts, employee, replacement = 'P') => {
  * @param {number} params.month
  * @param {Array<Object>} params.employees
  * @param {Array<Object>} params.shiftTypes
- * @param {Array<Array<string>>} params.matrix
+ * @param {Array<Object>} params.matrices - Array of { id, name, rows } objects
  * @param {Array<Object>} params.coverageRules
  * @param {Array<Object>} params.constraints
  * @param {Object|null} params.previousMonthSchedule
@@ -87,14 +87,23 @@ export const generateMonthlySchedule = ({
   month,
   employees,
   shiftTypes,
-  matrix,
+  matrices,
   coverageRules,
   constraints,
   previousMonthSchedule,
   optimizerOptions = {}
 }) => {
   const daysInMonth = getDaysInMonth(year, month);
-  const cycleLength = matrix[0]?.length || 7;
+
+  // Build a map from matrixId to matrix rows for quick lookup
+  const matrixMap = {};
+  for (const m of matrices) {
+    matrixMap[m.id] = m.rows;
+  }
+
+  // Default matrix is the first one
+  const defaultMatrix = matrices[0]?.rows || generateDefaultMatrix();
+  const cycleLength = defaultMatrix[0]?.length || 7;
 
   // Step 1: Run optimizer
   const optimizerResult = optimizeSchedule({
@@ -103,7 +112,9 @@ export const generateMonthlySchedule = ({
     daysInMonth,
     employees,
     shiftTypes,
-    matrix,
+    matrices,
+    matrixMap,
+    defaultMatrix,
     constraints,
     coverageRules,
     previousMonthSchedule,
@@ -201,9 +212,11 @@ export const generateMonthlySchedule = ({
 
     // If no shifts from optimizer, generate from matrix (shouldn't happen)
     if (shifts.length === 0) {
+      // Get the employee's assigned matrix, or use default
+      const empMatrix = (emp.matrixId && matrixMap[emp.matrixId]) || defaultMatrix;
       const matrixRow = 0;
       const dayOffset = 0;
-      const pattern = matrix[matrixRow] || matrix[0];
+      const pattern = empMatrix[matrixRow] || empMatrix[0];
 
       shifts = [];
       for (let day = 0; day < daysInMonth; day++) {

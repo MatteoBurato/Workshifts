@@ -71,7 +71,8 @@ export default function TurniOSSApp() {
   const [shiftTypes, setShiftTypes] = useState(DEFAULT_SHIFT_TYPES);
   const [constraints, setConstraints] = useState(DEFAULT_CONSTRAINTS);
   const [employees, setEmployees] = useState([]);
-  const [matrix, setMatrix] = useState([]);
+  // Multiple matrices: each has { id, name, rows }
+  const [matrices, setMatrices] = useState([]);
 
   // Schedule state
   const [previousMonthSchedule, setPreviousMonthSchedule] = useState(null);
@@ -135,7 +136,7 @@ export default function TurniOSSApp() {
     const newPreset = {
       id: generateId(),
       name,
-      config: { facility, shiftTypes, constraints, employees, matrix },
+      config: { facility, shiftTypes, constraints, employees, matrices },
       createdAt: new Date().toISOString()
     };
     saveLocalPresets([...localPresets, newPreset]);
@@ -153,7 +154,7 @@ export default function TurniOSSApp() {
       setShiftTypes(DEFAULT_SHIFT_TYPES);
       setConstraints(DEFAULT_CONSTRAINTS);
       setEmployees([]);
-      setMatrix([]);
+      setMatrices([]);
       setGeneratedSchedule(null);
       setCurrentPresetId(null);
     } else {
@@ -163,7 +164,19 @@ export default function TurniOSSApp() {
         if (preset.config.shiftTypes) setShiftTypes(preset.config.shiftTypes);
         if (preset.config.constraints) setConstraints(preset.config.constraints);
         if (preset.config.employees) setEmployees(preset.config.employees);
-        if (preset.config.matrix) setMatrix(preset.config.matrix);
+        // Handle both old `matrix` format and new `matrices` format
+        if (preset.config.matrices) {
+          setMatrices(preset.config.matrices);
+        } else if (preset.config.matrix && preset.config.matrix.length > 0) {
+          // Backward compatibility: convert old single matrix to new format
+          setMatrices([{
+            id: generateId(),
+            name: 'Principale',
+            rows: preset.config.matrix
+          }]);
+        } else {
+          setMatrices([]);
+        }
         setCurrentPresetId(presetId);
         setGeneratedSchedule(null);
       }
@@ -192,9 +205,17 @@ export default function TurniOSSApp() {
       workerRef.current.terminate();
     }
 
-    // Use existing matrix or generate default
-    let m = matrix.length ? matrix : generateDefaultMatrix();
-    if (!matrix.length) setMatrix(m);
+    // Ensure we have at least one matrix; create default if needed
+    let workingMatrices = matrices;
+    if (matrices.length === 0) {
+      const defaultMatrix = {
+        id: generateId(),
+        name: 'Principale',
+        rows: generateDefaultMatrix()
+      };
+      workingMatrices = [defaultMatrix];
+      setMatrices(workingMatrices);
+    }
 
     const useGreedy = !!options.forceGreedy;
     setIsGreedyMode(useGreedy);
@@ -257,7 +278,7 @@ export default function TurniOSSApp() {
         month,
         employees,
         shiftTypes,
-        matrix: m,
+        matrices: workingMatrices,
         coverageRules: facility.coverageRules,
         constraints,
         previousMonthSchedule,
@@ -273,7 +294,7 @@ export default function TurniOSSApp() {
         }
       }
     });
-  }, [year, month, employees, shiftTypes, matrix, facility, constraints, previousMonthSchedule]);
+  }, [year, month, employees, shiftTypes, matrices, facility, constraints, previousMonthSchedule]);
 
   const handleRetryGreedy = () => {
     generate({ forceGreedy: true });
@@ -559,13 +580,14 @@ export default function TurniOSSApp() {
             employees={employees}
             setEmployees={setEmployees}
             shiftTypes={shiftTypes}
+            matrices={matrices}
           />
         )}
 
         {activeTab === 'matrix' && (
           <MatrixEditor
-            matrix={matrix}
-            setMatrix={setMatrix}
+            matrices={matrices}
+            setMatrices={setMatrices}
             shiftTypes={shiftTypes}
             constraints={constraints}
             coverageRules={facility.coverageRules}
@@ -580,7 +602,7 @@ export default function TurniOSSApp() {
             schedule={generatedSchedule}
             employees={employees}
             shiftTypes={shiftTypes}
-            matrix={matrix}
+            matrices={matrices}
             year={year}
             month={month}
             warnings={warnings}

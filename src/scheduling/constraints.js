@@ -221,3 +221,49 @@ export const getValidShiftsForPosition = (existingShifts, constraints, shiftType
     .map(st => st.id)
     .filter(shiftId => !wouldViolateConstraints(existingShifts, shiftId, constraints, shiftTypes));
 };
+
+/**
+ * Get valid shifts for a position in a CYCLIC row (matrix row where end wraps to beginning)
+ *
+ * For matrix rows, the pattern is cyclic - position 0 follows position (N-1).
+ * This function builds a test sequence around the target position and validates
+ * that the candidate shift doesn't violate constraints in the cyclic context.
+ *
+ * @param {Array<string>} row - The current row (cyclic pattern)
+ * @param {number} pos - Position being mutated (0-indexed)
+ * @param {Array<Constraint>} constraints - Active constraints
+ * @param {Array<Object>} shiftTypes - Available shift types
+ * @returns {Array<string>} List of valid shift IDs for this position
+ */
+export const getValidShiftsForCyclicPosition = (row, pos, constraints, shiftTypes) => {
+  const colCount = row.length;
+  // Window size capped for performance - 2*colCount covers full wrap-around, max 14
+  const windowSize = Math.min(colCount * 2, 14);
+  const halfWindow = Math.floor(windowSize / 2);
+
+  return shiftTypes
+    .map(st => st.id)
+    .filter(candidateShift => {
+      // Build test sequence with candidate at center, respecting cyclic wrap
+      const testSequence = [];
+
+      // Add shifts before the position (wrapping from end if needed)
+      for (let i = halfWindow; i > 0; i--) {
+        testSequence.push(row[(pos - i + colCount) % colCount]);
+      }
+
+      // Add the candidate shift at center
+      testSequence.push(candidateShift);
+
+      // Add shifts after the position (wrapping to beginning if needed)
+      for (let i = 1; i <= halfWindow; i++) {
+        testSequence.push(row[(pos + i) % colCount]);
+      }
+
+      const errors = validateSequenceWithConstraints(testSequence, constraints, shiftTypes);
+      const candidatePos = halfWindow;
+
+      // Only reject if errors involve positions near the candidate
+      return !errors.some(e => Math.abs(e.day - candidatePos) <= 1);
+    });
+};

@@ -14,7 +14,7 @@ import PreviousMonthUploader from './PreviousMonthUploader';
  * @param {Object|null} props.schedule - Generated schedule object
  * @param {Array<Object>} props.employees - Employee list
  * @param {Array<Object>} props.shiftTypes - Shift type definitions
- * @param {Array<Array<string>>} props.matrix - Matrix pattern
+ * @param {Array<Object>} props.matrices - Array of { id, name, rows } matrix objects
  * @param {number} props.year - Year
  * @param {number} props.month - Month index (0-11)
  * @param {Array<Object>} props.warnings - Generation warnings
@@ -30,7 +30,7 @@ const ScheduleViewer = ({
   schedule,
   employees,
   shiftTypes,
-  matrix,
+  matrices,
   year,
   month,
   warnings,
@@ -59,20 +59,38 @@ const ScheduleViewer = ({
   const [mutationPressure, setMutationPressure] = useState(50); // 0-100
   const [selectionPressure, setSelectionPressure] = useState(50); // 0-100
 
+  // Build matrix map for lookups
+  const matrixMap = useMemo(() => {
+    const map = {};
+    for (const m of (matrices || [])) {
+      map[m.id] = m.rows;
+    }
+    return map;
+  }, [matrices]);
+
+  const defaultMatrix = matrices?.[0]?.rows || [];
+
   // Compute stats for the current schedule
   const stats = useMemo(() => {
-    if (!schedule || !matrix || matrix.length === 0) return null;
+    if (!schedule || !matrices || matrices.length === 0) return null;
 
     let totalDeltaHours = 0;
     let totalChanges = 0;
-    const rowLength = matrix[0].length;
-    const fullPattern = matrix.flat(); // Assuming flat pattern logic matches generator
 
-    Object.values(schedule).forEach(s => {
+    Object.entries(schedule).forEach(([empId, s]) => {
       // 1. Delta Hours
       totalDeltaHours += Math.abs(s.hoursDiff);
 
-      // 2. Matrix Changes
+      // 2. Matrix Changes - use the correct matrix for this employee
+      const emp = employees.find(e => e.id === empId);
+      const empMatrixId = s.matrixId || emp?.matrixId || matrices[0]?.id;
+      const matrix = matrixMap[empMatrixId] || defaultMatrix;
+
+      if (!matrix || matrix.length === 0) return;
+
+      const rowLength = matrix[0].length;
+      const fullPattern = matrix.flat();
+
       // Reconstruct baseline
       const startIndex = s.matrixRow * rowLength + s.dayOffset;
       s.shifts.forEach((shift, i) => {
@@ -80,7 +98,7 @@ const ScheduleViewer = ({
         // Note: Generator uses snake pattern: (startIndex + day + firstDay) % fullLen
         const patternIndex = (startIndex + i + firstDay) % fullPattern.length;
         const expected = fullPattern[patternIndex];
-        
+
         // If actual shift is different from expected matrix shift
         if (shift !== expected) {
             totalChanges++;
@@ -89,7 +107,7 @@ const ScheduleViewer = ({
     });
 
     return { totalDeltaHours, totalChanges };
-  }, [schedule, matrix, year, month]);
+  }, [schedule, matrices, matrixMap, defaultMatrix, employees, firstDay]);
 
   // Calculate weights for generation
   // Sliders modify the default WEIGHTS imported from scheduling/ga/fitness.js

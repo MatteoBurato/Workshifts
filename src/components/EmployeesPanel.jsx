@@ -9,19 +9,21 @@ import { generateId } from '../utils';
  * @param {Array<Object>} props.employees - Employee list
  * @param {Function} props.setEmployees - Setter for employees
  * @param {Array<Object>} props.shiftTypes - Available shift types
+ * @param {Array<Object>} props.matrices - Available matrices for assignment
  */
-const EmployeesPanel = ({ employees, setEmployees, shiftTypes = [] }) => {
+const EmployeesPanel = ({ employees, setEmployees, shiftTypes = [], matrices = [] }) => {
   const [newEmp, setNewEmp] = useState({
     name: '',
     surname: '',
     contractHours: 38,
-    excludedShifts: []
+    excludedShifts: [],
+    matrixId: null // null means "auto" (first available matrix)
   });
 
   const addEmployee = () => {
     if (newEmp.name || newEmp.surname) {
       setEmployees([...employees, { id: generateId(), ...newEmp }]);
-      setNewEmp({ name: '', surname: '', contractHours: 38, excludedShifts: [] });
+      setNewEmp({ name: '', surname: '', contractHours: 38, excludedShifts: [], matrixId: null });
     }
   };
 
@@ -66,6 +68,7 @@ const EmployeesPanel = ({ employees, setEmployees, shiftTypes = [] }) => {
               <th className="text-left py-2 px-2 text-xs font-medium text-slate-600">Nome</th>
               <th className="text-left py-2 px-2 text-xs font-medium text-slate-600">Ore/Sett</th>
               <th className="text-left py-2 px-2 text-xs font-medium text-slate-600">Ore/Mese (stima)</th>
+              <th className="text-left py-2 px-2 text-xs font-medium text-slate-600">Matrice</th>
               <th className="text-left py-2 px-2 text-xs font-medium text-slate-600">Escludi Turni</th>
               <th className="py-2 px-2"></th>
             </tr>
@@ -99,6 +102,18 @@ const EmployeesPanel = ({ employees, setEmployees, shiftTypes = [] }) => {
                 </td>
                 <td className="py-1.5 px-2 text-xs text-slate-500">
                   ~{Math.round(emp.contractHours * 4.33)}h
+                </td>
+                <td className="py-1.5 px-2">
+                  <select
+                    value={emp.matrixId || ''}
+                    onChange={(e) => updateEmployee(emp.id, 'matrixId', e.target.value || null)}
+                    className="w-24 px-1.5 py-1 border border-slate-200 rounded text-xs"
+                  >
+                    <option value="">Auto</option>
+                    {matrices.map(m => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
                 </td>
                 <td className="py-1.5 px-2">
                   <div className="flex flex-wrap gap-1">
@@ -158,7 +173,18 @@ const EmployeesPanel = ({ employees, setEmployees, shiftTypes = [] }) => {
           placeholder="Ore"
           className="w-14 px-2 py-1.5 border border-slate-300 rounded text-xs"
         />
-        
+
+        <select
+          value={newEmp.matrixId || ''}
+          onChange={(e) => setNewEmp({ ...newEmp, matrixId: e.target.value || null })}
+          className="w-24 px-1.5 py-1.5 border border-slate-300 rounded text-xs"
+        >
+          <option value="">Auto</option>
+          {matrices.map(m => (
+            <option key={m.id} value={m.id}>{m.name}</option>
+          ))}
+        </select>
+
         <div className="flex items-center gap-1">
           <span className="text-xs text-slate-500 mr-1">Escludi:</span>
           {shiftTypes.map(st => {

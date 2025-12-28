@@ -7,7 +7,6 @@
 
 import { evaluateFitness } from './fitness.js';
 import { tournamentSelect, createOffspring, cloneChromosome } from './operators.js';
-import { getFirstDayOfMonth } from '../../utils/dates.js';
 
 /**
  * Default GA parameters
@@ -22,139 +21,6 @@ export const DEFAULT_SCHEDULE_GA_CONFIG = {
   STAGNATION_LIMIT: 1000,
   TARGET_FITNESS: 0,
   TIMEOUT_MS: 3000000
-};
-
-/**
- * Check if an employee can perform a given shift
- * @param {Object} emp - Employee object
- * @param {string} shift - Shift ID
- * @returns {boolean}
- */
-const canDoShift = (emp, shift) => {
-  return !emp.excludedShifts || !emp.excludedShifts.includes(shift);
-};
-
-/**
- * Generate the baseline schedule from matrix pattern
- * This is what greedy would produce
- *
- * Uses a "contemporaneous swap" strategy for handling excluded shifts:
- * When an employee cannot do their assigned shift, we try to swap with
- * a colleague on the same day who (a) can do the excluded shift, and
- * (b) holds a shift the focal employee can do. This preserves coverage
- * balance better than arbitrary replacement.
- *
- * @param {Object} params
- * @returns {Object} Baseline schedule by employee ID
- */
-export const generateBaselineSchedule = ({
-  employees,
-  matrix,
-  daysInMonth,
-  year,
-  month,
-  initialAssignments,
-  shiftTypes
-}) => {
-  const baseline = {};
-  const fullPattern = matrix.flat();
-  const rowLength = matrix[0].length;
-  const dayOfWeekOffset = getFirstDayOfMonth(year, month);
-
-  // Step 1: Generate raw shifts from matrix pattern (ignoring exclusions)
-  employees.forEach((emp, empIndex) => {
-    let matrixRow, startDayOffset, hasHistory;
-
-    if (initialAssignments) {
-      const assignment = initialAssignments.find(a => a.employeeId === emp.id);
-      matrixRow = assignment?.matrixRow ?? 0;
-      startDayOffset = assignment?.dayOffset ?? 0;
-      hasHistory = assignment?.hasHistory ?? false;
-    } else {
-      // Fallback to snake pattern
-      matrixRow = empIndex % matrix.length;
-      startDayOffset = 0;
-      hasHistory = false;
-    }
-
-    const startIndex = matrixRow * rowLength + startDayOffset;
-    const effectiveDOW = hasHistory ? 0 : dayOfWeekOffset;
-
-    const shifts = [];
-    for (let day = 0; day < daysInMonth; day++) {
-      const patternIndex = (startIndex + day + effectiveDOW) % fullPattern.length;
-      shifts.push(fullPattern[patternIndex]);
-    }
-
-    baseline[emp.id] = shifts;
-  });
-
-  // Step 2: Handle exclusions via contemporaneous swaps
-  // Process each day and try to resolve conflicts through swapping
-  for (let day = 0; day < daysInMonth; day++) {
-    // Find all employees with conflicts on this day
-    const conflicts = employees.filter(emp => {
-      const shift = baseline[emp.id][day];
-      return !canDoShift(emp, shift);
-    });
-
-    // Shuffle conflicts to randomize which ones get resolved first
-    for (let i = conflicts.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [conflicts[i], conflicts[j]] = [conflicts[j], conflicts[i]];
-    }
-
-    // Try to resolve each conflict via swap
-    for (const focalEmp of conflicts) {
-      const focalShift = baseline[focalEmp.id][day];
-
-      // Skip if already resolved (e.g., through a previous swap in this loop)
-      if (canDoShift(focalEmp, focalShift)) {
-        continue;
-      }
-
-      // Find potential swap partners: employees who can do focalShift
-      // and whose current shift the focal employee can do
-      const potentialPartners = employees.filter(partner => {
-        if (partner.id === focalEmp.id) return false;
-
-        const partnerShift = baseline[partner.id][day];
-
-        // Partner must be able to do the focal employee's disallowed shift
-        const partnerCanDoFocalShift = canDoShift(partner, focalShift);
-
-        // Focal employee must be able to do the partner's current shift
-        const focalCanDoPartnerShift = canDoShift(focalEmp, partnerShift);
-
-        // Partner must still be able to do their current shift after swap
-        // (they keep their ability to do focalShift, which they're receiving)
-        // This is already covered by partnerCanDoFocalShift
-
-        return partnerCanDoFocalShift && focalCanDoPartnerShift;
-      });
-
-      if (potentialPartners.length > 0) {
-        // Pick a random swap partner to avoid deterministic bias
-        const partner = potentialPartners[Math.floor(Math.random() * potentialPartners.length)];
-        const partnerShift = baseline[partner.id][day];
-
-        // Perform the swap
-        baseline[focalEmp.id][day] = partnerShift;
-        baseline[partner.id][day] = focalShift;
-      } else {
-        // Fallback: no swap partner found, use first valid shift type
-        const validShift = shiftTypes.find(st =>
-          canDoShift(focalEmp, st.id)
-        );
-        if (validShift) {
-          baseline[focalEmp.id][day] = validShift.id;
-        }
-        // If no valid shift exists at all, keep the original (shouldn't happen in practice)
-      }
-    }
-  }
-
-  return baseline;
 };
 
 /**
@@ -229,29 +95,24 @@ const evaluatePopulation = (population, context) => {
  * Run the genetic algorithm
  *
  * @param {Object} params
- * @param {number} params.year
- * @param {number} params.month
  * @param {number} params.daysInMonth
  * @param {Array<Object>} params.employees
  * @param {Array<Object>} params.shiftTypes
- * @param {Array<Array<string>>} params.matrix
+ * @param {Object} params.baselineShifts - Pre-generated baseline schedule by employee ID
  * @param {Array<Object>} params.constraints
- * @param {Object<string, number>} params.requirements
+ * @param {Array<Object>} params.coverageRules
  * @param {Object} params.options - GA options
  * @param {Function} params.onProgress - Progress callback
  * @returns {Object} Result with best schedule
  */
 export const runGeneticAlgorithm = (params) => {
   const {
-    year,
-    month,
     daysInMonth,
     employees,
     shiftTypes,
-    matrix,
+    baselineShifts,  // Now received directly from caller
     constraints,
     coverageRules,
-    initialAssignments,
     options = {},
     onProgress
   } = params;
@@ -278,17 +139,6 @@ export const runGeneticAlgorithm = (params) => {
     timeoutMs: opts.timeoutMs
   });
   const startTime = Date.now();
-
-  // Generate baseline (greedy) schedule
-  const baselineShifts = generateBaselineSchedule({
-    employees,
-    matrix,
-    daysInMonth,
-    year,
-    month,
-    initialAssignments,
-    shiftTypes
-  });
 
   // Context for fitness evaluation
   const context = {

@@ -6,7 +6,6 @@
 
 export {
   runGeneticAlgorithm,
-  generateBaselineSchedule,
   DEFAULT_SCHEDULE_GA_CONFIG
 } from './geneticAlgorithm.js';
 
